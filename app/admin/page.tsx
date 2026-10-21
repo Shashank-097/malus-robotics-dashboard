@@ -2,8 +2,9 @@
 
 // PM TOOL REPO — src/app/admin/page.tsx
 // Light, simple overview. Behaviour kept: middleware-guarded access, /api/progress,
-// daily sheet save, search + status filter + pagination, open a project, AlertCenter.
-// Logout (with the "logged out safely" flash) now lives in the shared header (ui-kit).
+// daily sheet save, search + status filter + pagination, open a project.
+// Tasks can now have up to 3 assignees: shown as stacked avatars, searchable,
+// and counted per person in Team workload. Legacy rows (single owner) still work.
 
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
@@ -17,8 +18,10 @@ import {
   AppShell, Avatar, StatusPill, normStatus, isOverdue, fmt, PENDING, STATUS_COLOR, PRIORITY_COLOR,
 } from "@/components/ui-kit";
 
+type Assignee = { id?: string; name: string };
 type Report = {
   _id: string; projectId?: string; projectName?: string; owner?: string; ownerId?: string;
+  assignees?: Assignee[];
   status?: string; priority?: string; location?: string; customer?: string; stage?: string;
   department?: string; uploadedBy?: string; endDate?: string;
 };
@@ -29,6 +32,10 @@ const FILTERS = ["All", "Open", "In Process", "Hold", "Closed", "N.A."];
 const KPIS = ["Open", "In Process", "Hold", "Closed"];
 const PAGE_SIZE = 10;
 const COLS = { "--cols": "2.2fr 1fr 1.3fr .9fr 1fr" } as CSSProperties;
+
+// New rows use assignees[]; older rows fall back to the single owner.
+const getAssignees = (r: Report): Assignee[] =>
+  r.assignees?.length ? r.assignees : r.owner?.trim() ? [{ id: r.ownerId, name: r.owner.trim() }] : [];
 
 export default function AdminPage() {
   const router = useRouter();
@@ -129,7 +136,10 @@ export default function AdminPage() {
   const filteredReports = useMemo(() => {
     const q = debouncedSearch.toLowerCase();
     return reports.filter((r) => {
-      const fields = [r.projectName, r.owner, r.projectId, r.uploadedBy, r.customer, r.status, r.stage, r.priority, r.department, r.location];
+      const fields = [
+        r.projectName, ...getAssignees(r).map((a) => a.name), r.projectId, r.uploadedBy,
+        r.customer, r.status, r.stage, r.priority, r.department, r.location,
+      ];
       return fields.some((f) => (f || "").toLowerCase().includes(q)) && (filter === "All" || normStatus(r.status) === filter);
     });
   }, [reports, debouncedSearch, filter]);
@@ -137,12 +147,17 @@ export default function AdminPage() {
   const totalPages = Math.max(1, Math.ceil(filteredReports.length / PAGE_SIZE));
   const pagedReports = filteredReports.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
 
+  // Pending tasks per person: a task shared by 3 people counts once for each of them.
   const workload = useMemo(() => {
     const m: Record<string, number> = {};
     for (const r of reports) {
       if (!PENDING.includes(normStatus(r.status))) continue;
-      const o = r.owner?.trim() || "Unassigned";
-      m[o] = (m[o] || 0) + 1;
+      const list = getAssignees(r);
+      if (!list.length) { m["Unassigned"] = (m["Unassigned"] || 0) + 1; continue; }
+      for (const a of list) {
+        const name = a.name?.trim() || "Unassigned";
+        m[name] = (m[name] || 0) + 1;
+      }
     }
     return Object.entries(m).sort((a, b) => b[1] - a[1]);
   }, [reports]);
@@ -202,7 +217,7 @@ export default function AdminPage() {
             </div>
             <div style={{ position: "relative", width: "100%", maxWidth: 300 }}>
               <Search size={15} className="muted" style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)" }} />
-              <input className="inp" style={{ paddingLeft: 36, paddingRight: search ? 34 : 13 }} placeholder="Search project, owner, ID, customer"
+              <input className="inp" style={{ paddingLeft: 36, paddingRight: search ? 34 : 13 }} placeholder="Search project, assignee, ID, customer"
                 value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search projects" />
               {search && (
                 <button onClick={() => setSearch("")} aria-label="Clear search" className="muted"
@@ -219,7 +234,7 @@ export default function AdminPage() {
 
           <div style={{ overflowX: "auto" }}>
             <div style={{ minWidth: 680 }}>
-              <div className="thead" style={COLS}><span>Project</span><span>Status</span><span>Owner</span><span>Priority</span><span>Due</span></div>
+              <div className="thead" style={COLS}><span>Project</span><span>Status</span><span>Assignees</span><span>Priority</span><span>Due</span></div>
 
               {isLoadingReports && Array.from({ length: 5 }).map((_, i) => (
                 <div key={i} className="trow" style={{ ...COLS, cursor: "default" }}>
@@ -229,6 +244,7 @@ export default function AdminPage() {
 
               {!isLoadingReports && pagedReports.map((r) => {
                 const late = isOverdue(r);
+                const people = getAssignees(r);
                 return (
                   <button key={r._id} type="button" className="trow" style={COLS} onClick={() => router.push(`/admin/projects/${r._id}`)}>
                     <span style={{ minWidth: 0 }}>
@@ -240,8 +256,16 @@ export default function AdminPage() {
                     </span>
                     <span><StatusPill status={r.status} /></span>
                     <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-                      <Avatar name={r.owner || "?"} size={28} />
-                      <span className="truncate" style={{ fontSize: 14 }}>{r.owner || "Unassigned"}</span>
+                      <span style={{ display: "flex", flexShrink: 0 }}>
+                        {(people.length ? people : [{ name: "?" }]).map((a, i) => (
+                          <span key={`${a.name}-${i}`} style={{ marginLeft: i ? -8 : 0, border: "2px solid #fff", borderRadius: 99, display: "inline-flex" }}>
+                            <Avatar name={a.name} size={28} />
+                          </span>
+                        ))}
+                      </span>
+                      <span className="truncate" style={{ fontSize: 14 }} title={people.map((a) => a.name).join(", ")}>
+                        {people.length ? people[0].name + (people.length > 1 ? ` +${people.length - 1}` : "") : "Unassigned"}
+                      </span>
                     </span>
                     <span style={{ fontSize: 13, fontWeight: 600, color: PRIORITY_COLOR[r.priority || ""] || "var(--muted)" }}>{r.priority || "—"}</span>
                     <span style={{ fontSize: 14, color: late ? "#d92d3a" : "inherit", fontWeight: late ? 600 : 400 }}>{fmt(r.endDate)}</span>
@@ -284,7 +308,7 @@ export default function AdminPage() {
 
           <section className="card">
             <div className="card-h">
-              <div><h2>Team workload</h2><p className="sub">Pending tasks per owner</p></div>
+              <div><h2>Team workload</h2><p className="sub">Pending tasks per person</p></div>
             </div>
             {workload.length === 0 ? (
               <div className="empty">Nothing pending right now.</div>
