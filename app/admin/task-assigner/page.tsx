@@ -1,9 +1,9 @@
 "use client";
 
 // PM TOOL REPO — src/app/admin/task-assigner/page.tsx
-// Light, simple task assigner. Logic unchanged from the previous version:
-// project tracking, sorting/search, employee match by ownerId or name, legacy status
-// normalising, and the assign drawer (existing project or new project).
+// Light, simple task assigner. A task can now be assigned to 1, 2 or 3 people (assignees[]).
+// owner / ownerId are still saved as the FIRST assignee so older code keeps working.
+// Legacy rows (only owner / ownerId) are still matched and displayed.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { CSSProperties, FormEvent, ReactNode } from "react";
@@ -19,8 +19,10 @@ type SortKey = "due" | "priority" | "status" | "newest";
 type View = "project" | "list";
 
 interface Employee { employeeId: string; name: string; department?: string }
+interface Assignee { id: string; name: string }
 interface Task {
-  _id?: string; id?: string; ownerId?: string; owner?: string; projectId?: string; projectName?: string;
+  _id?: string; id?: string; ownerId?: string; owner?: string; assignees?: Assignee[];
+  projectId?: string; projectName?: string;
   stage?: string; status?: string; priority?: string; startDate?: string; endDate?: string; location?: string;
   customer?: string; actionTaken?: string; pendingPoints?: string; remarks?: string;
 }
@@ -40,6 +42,8 @@ const PRIORITY_RANK: Record<string, number> = { Critical: 0, High: 1, Medium: 2,
 const STATUS_RANK: Record<StatusName, number> = { "In Process": 0, Open: 1, Hold: 2, Closed: 3, "N.A.": 4 };
 const SORT_LABEL: Record<SortKey, string> = { due: "Due date", priority: "Priority", status: "Status", newest: "Newest first" };
 const NO_PROJECT = "__none__";
+const MAX_ASSIGNEES = 3;
+const SLOT_LABELS = ["Assign to", "Second member (optional)", "Third member (optional)"];
 
 /* ---------------- helpers ---------------- */
 
@@ -52,10 +56,17 @@ function normalizeTasks(data: unknown): Task[] {
 
 const clean = (s?: string) => (s || "").trim().toLowerCase();
 
-// ownerId first; fall back to the free-text owner name for rows created before ownerId existed.
+// New rows use assignees[]; older rows fall back to the single owner / ownerId.
+function getAssignees(t: Task): Assignee[] {
+  if (t.assignees?.length) return t.assignees;
+  return t.owner || t.ownerId ? [{ id: t.ownerId || "", name: t.owner || "" }] : [];
+}
+
+// id first; fall back to the free-text name for rows created before ids existed.
 function belongs(t: Task, emp: { employeeId: string; name: string }): boolean {
-  if (t.ownerId) return clean(t.ownerId) === clean(emp.employeeId);
-  return !!t.owner && clean(t.owner) === clean(emp.name);
+  return getAssignees(t).some((a) =>
+    a.id ? clean(a.id) === clean(emp.employeeId) : !!a.name && clean(a.name) === clean(emp.name)
+  );
 }
 
 const projectKeyOf = (t: Task) => (t.projectId || t.projectName || "").trim() || NO_PROJECT;
@@ -79,7 +90,7 @@ function buildProjects(list: Task[]): Project[] {
     if (PENDING.includes(s)) p.pending++;
     if (s === "Closed") p.done++;
     if (isOverdue(t)) p.overdue++;
-    if (t.owner && !p.owners.includes(t.owner)) p.owners.push(t.owner);
+    for (const a of getAssignees(t)) if (a.name && !p.owners.includes(a.name)) p.owners.push(a.name);
   }
   const out = Array.from(map.values());
   out.forEach((p) => { p.pct = p.total ? Math.round((p.done / p.total) * 100) : 0; });
@@ -114,11 +125,12 @@ function Field({ label, id, children }: { label: string; id: string; children: R
 function TaskRow({ t, showOwner }: { t: Task; showOwner: boolean }) {
   const late = isOverdue(t);
   const sc = STATUS_COLOR[normStatus(t.status)];
+  const names = getAssignees(t).map((a) => a.name).filter(Boolean).join(", ");
   return (
     <li className="grid gap-3 sm:grid-cols-[1fr_auto] items-center p-4" style={{ background: "#fff", border: "1px solid var(--line)", borderLeft: `4px solid ${sc}`, borderRadius: 12 }}>
       <div style={{ minWidth: 0 }}>
         <div style={{ fontWeight: 600, fontSize: 15 }} className="break-words">{t.stage || "Untitled task"}</div>
-        <div className="muted" style={{ fontSize: 13, marginTop: 2 }}>{[showOwner ? t.owner : "", t.customer, t.location].filter(Boolean).join(" · ") || "No extra details"}</div>
+        <div className="muted" style={{ fontSize: 13, marginTop: 2 }}>{[showOwner ? names : "", t.customer, t.location].filter(Boolean).join(" · ") || "No extra details"}</div>
         {t.pendingPoints && <div style={{ fontSize: 13, marginTop: 6 }}><span className="muted">Pending: </span>{t.pendingPoints}</div>}
         {t.actionTaken && <div style={{ fontSize: 13, marginTop: 4 }}><span className="muted">Action taken: </span>{t.actionTaken}</div>}
       </div>
@@ -153,7 +165,8 @@ export default function TaskAssignerPage() {
   const [view, setView] = useState<View>("project");
   const [taskQuery, setTaskQuery] = useState("");
 
-  const [ownerId, setOwnerId] = useState("");
+  // employeeIds picked for the 3 assignee slots ("" = empty slot)
+  const [assignedIds, setAssignedIds] = useState<string[]>(["", "", ""]);
   const [projectPick, setProjectPick] = useState("");
   const [department, setDepartment] = useState("");
   const [uploadedBy, setUploadedBy] = useState("");
@@ -216,6 +229,7 @@ export default function TaskAssignerPage() {
   const pct = pendingCount + doneCount ? Math.round((doneCount / (pendingCount + doneCount)) * 100) : 0;
   const overdueCount = useMemo(() => scoped.filter(isOverdue).length, [scoped]);
 
+  // pending tasks per employee (a shared task counts for every assignee)
   const perEmp = useMemo(() => {
     const m: Record<string, number> = {};
     for (const emp of employees) {
@@ -241,7 +255,8 @@ export default function TaskAssignerPage() {
       if (filter === "done" && s !== "Closed") return false;
       if (filter !== "all" && filter !== "pending" && filter !== "done" && s !== filter) return false;
       if (projectFilter && projectKeyOf(t) !== projectFilter) return false;
-      if (q && !`${t.stage} ${t.projectName} ${t.projectId} ${t.owner} ${t.customer}`.toLowerCase().includes(q)) return false;
+      const names = getAssignees(t).map((a) => a.name).join(" ");
+      if (q && !`${t.stage} ${t.projectName} ${t.projectId} ${names} ${t.customer}`.toLowerCase().includes(q)) return false;
       return true;
     }), sort);
   }, [scoped, filter, projectFilter, taskQuery, sort]);
@@ -259,8 +274,18 @@ export default function TaskAssignerPage() {
 
   function openDrawer() {
     setError("");
-    setOwnerId(selected || ownerId);
+    if (selected) setAssignedIds([selected, "", ""]);
     setDrawer(true);
+  }
+
+  // Set one slot, then close any gaps so the filled slots always come first.
+  function setSlot(i: number, v: string) {
+    setAssignedIds((prev) => {
+      const next = [...prev];
+      next[i] = v;
+      const filled = next.filter(Boolean);
+      return [...filled, ...Array(MAX_ASSIGNEES - filled.length).fill("")];
+    });
   }
 
   function pickProject(v: string) {
@@ -273,20 +298,28 @@ export default function TaskAssignerPage() {
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError("");
-    if (!ownerId) return setError("Choose who this task is for.");
+
+    const picked = assignedIds
+      .filter(Boolean)
+      .map((id) => employees.find((x) => x.employeeId === id))
+      .filter((x): x is Employee => !!x);
+
+    if (!picked.length) return setError("Choose at least one person for this task.");
     if (!form.projectId.trim() && !form.projectName.trim()) return setError("Choose a project, or create a new one.");
     if (!form.stage.trim()) return setError("Describe the task before assigning it.");
 
-    const emp = employees.find((x) => x.employeeId === ownerId);
+    const first = picked[0];
     setSubmitting(true);
     try {
       const res = await fetch("/api/progress", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          ...form, status, ownerId,
-          owner: emp ? emp.name : "",
-          department: department || emp?.department || "",
+          ...form, status,
+          assignees: picked.map((p) => ({ id: p.employeeId, name: p.name })),
+          ownerId: first.employeeId,
+          owner: first.name,
+          department: department || first.department || "",
           uploadedBy,
           seenByOwner: false,
           date: new Date().toISOString().slice(0, 10),
@@ -294,9 +327,9 @@ export default function TaskAssignerPage() {
       });
       const data: { success?: boolean; message?: string } = await res.json();
       if (data.success) {
-        setNotice(`Task assigned to ${emp?.name || "employee"}. It shows on their portal now.`);
+        setNotice(`Task assigned to ${picked.map((p) => p.name).join(", ")}. It shows on their portal now.`);
         setForm((p) => ({ ...EMPTY, priority: p.priority, startDate: p.startDate, endDate: p.endDate, projectId: p.projectId, projectName: p.projectName }));
-        setSelected(ownerId);
+        setSelected(first.employeeId);
         setFilter("pending");
         setDrawer(false);
         await loadTasks();
@@ -323,14 +356,26 @@ export default function TaskAssignerPage() {
             </div>
 
             <div className="grid gap-4">
-              <Field label="Assign to" id="owner">
-                <select id="owner" className="inp" value={ownerId} onChange={(e) => setOwnerId(e.target.value)}>
-                  <option value="">Select employee</option>
-                  {employees.map((emp) => (
-                    <option key={emp.employeeId} value={emp.employeeId}>{emp.name} ({emp.employeeId}){emp.department ? ` · ${emp.department}` : ""}</option>
-                  ))}
-                </select>
-              </Field>
+              {/* Up to 3 assignees: the next slot appears once the previous one is filled */}
+              {[0, 1, 2].map((i) => {
+                if (i > 0 && !assignedIds[i - 1]) return null;
+                const takenElsewhere = assignedIds.filter((id, j) => id && j !== i);
+                return (
+                  <Field key={i} id={`owner${i}`} label={SLOT_LABELS[i]}>
+                    <select id={`owner${i}`} className="inp" value={assignedIds[i]} onChange={(e) => setSlot(i, e.target.value)}>
+                      <option value="">{i === 0 ? "Select employee" : "None"}</option>
+                      {employees.filter((emp) => !takenElsewhere.includes(emp.employeeId)).map((emp) => (
+                        <option key={emp.employeeId} value={emp.employeeId}>
+                          {emp.name} ({emp.employeeId}){emp.department ? ` · ${emp.department}` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
+                );
+              })}
+              <p className="muted" style={{ fontSize: 12, marginTop: -8 }}>
+                {assignedIds.filter(Boolean).length}/{MAX_ASSIGNEES} assigned · all of them see this task on their portal
+              </p>
 
               <Field label="Project" id="proj">
                 <select id="proj" className="inp" value={projectPick} onChange={(e) => pickProject(e.target.value)}>
@@ -374,7 +419,7 @@ export default function TaskAssignerPage() {
                 <Field label="Customer" id="cust"><input id="cust" className="inp" value={form.customer} onChange={(e) => setField("customer", e.target.value)} /></Field>
               </div>
 
-              <Field label="Department" id="dept"><input id="dept" className="inp" value={department} onChange={(e) => setDepartment(e.target.value)} placeholder="Defaults to the employee's department" /></Field>
+              <Field label="Department" id="dept"><input id="dept" className="inp" value={department} onChange={(e) => setDepartment(e.target.value)} placeholder="Defaults to the first assignee's department" /></Field>
               <Field label="Pending points" id="pp"><textarea id="pp" className="inp" rows={2} value={form.pendingPoints} onChange={(e) => setField("pendingPoints", e.target.value)} /></Field>
               <Field label="Remarks" id="rem"><textarea id="rem" className="inp" rows={2} value={form.remarks} onChange={(e) => setField("remarks", e.target.value)} /></Field>
               <Field label="Assigned by" id="by"><input id="by" className="inp" value={uploadedBy} onChange={(e) => setUploadedBy(e.target.value)} /></Field>
@@ -471,7 +516,7 @@ export default function TaskAssignerPage() {
             </div>
 
             <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto_auto]" style={{ marginBottom: 16 }}>
-              <input className="inp" placeholder="Search tasks, project or customer" aria-label="Search tasks" value={taskQuery} onChange={(e) => setTaskQuery(e.target.value)} />
+              <input className="inp" placeholder="Search tasks, project, person or customer" aria-label="Search tasks" value={taskQuery} onChange={(e) => setTaskQuery(e.target.value)} />
               <select className="inp" aria-label="Sort tasks" value={sort} onChange={(e) => setSort(e.target.value as SortKey)}>
                 {(Object.keys(SORT_LABEL) as SortKey[]).map((k) => <option key={k} value={k}>Sort: {SORT_LABEL[k]}</option>)}
               </select>
